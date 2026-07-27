@@ -15,7 +15,7 @@ if (!botToken || botToken === 'your_bot_token') {
 const bot = new Telegraf(botToken);
 const prisma = new PrismaClient();
 
-import { mainMenu, walletMenu, settingsMenu, backToMain } from './menus';
+import { mainMenu, walletMenu, confirmDeleteMenu, settingsMenu, backToMain } from './menus';
 
 // In-memory session store for multi-step interactions (import wallet)
 const userSessions = new Map<string, { state: string }>();
@@ -157,6 +157,55 @@ bot.action('wallet_export', async (ctx) => {
     );
   } catch (err) {
     await ctx.answerCbQuery('Decryption failed!');
+  }
+});
+
+// Show delete confirmation screen
+bot.action('wallet_delete', async (ctx) => {
+  const telegramId = ctx.from?.id.toString();
+  if (!telegramId) return ctx.answerCbQuery();
+
+  const user = await prisma.user.findUnique({ where: { telegramId }, include: { wallets: true } });
+  if (!user || user.wallets.length === 0) {
+    await ctx.answerCbQuery('No wallet to delete!');
+    return;
+  }
+
+  const pubKey = user.wallets[0].publicKey;
+  await ctx.answerCbQuery();
+  await ctx.editMessageText(
+    `🗑️ <b>Delete Wallet</b>\n\n⚠️ <b>Are you absolutely sure?</b>\n\nThis will permanently delete your wallet and <b>ALL copy targets</b> linked to it from this bot.\n\n<b>Wallet:</b>\n<code>${pubKey}</code>\n\n<i>Your on-chain funds are NOT affected — make sure you have backed up your private key before deleting.</i>`,
+    { parse_mode: 'HTML', ...confirmDeleteMenu }
+  ).catch(() => {});
+});
+
+// Execute the actual deletion
+bot.action('wallet_delete_confirm', async (ctx) => {
+  const telegramId = ctx.from?.id.toString();
+  if (!telegramId) return ctx.answerCbQuery();
+
+  try {
+    const user = await prisma.user.findUnique({ where: { telegramId }, include: { wallets: { include: { copyTargets: true } } } });
+    if (!user || user.wallets.length === 0) {
+      await ctx.answerCbQuery('No wallet found!');
+      return;
+    }
+
+    const walletId = user.wallets[0].id;
+
+    // Delete all copy targets first (foreign key constraint)
+    await prisma.copyTarget.deleteMany({ where: { walletId } });
+    // Delete the wallet
+    await prisma.wallet.delete({ where: { id: walletId } });
+
+    await ctx.answerCbQuery('Wallet deleted.');
+    await ctx.editMessageText(
+      `✅ <b>Wallet Deleted.</b>\n\nYour wallet and all associated copy targets have been removed from this bot.\n\nUse <b>👛 Wallet Management</b> to generate or import a new wallet.`,
+      { parse_mode: 'HTML', ...walletMenu }
+    ).catch(() => {});
+  } catch (err) {
+    console.error('Delete wallet error:', err);
+    await ctx.answerCbQuery('Failed to delete wallet.');
   }
 });
 
