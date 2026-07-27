@@ -1,0 +1,20 @@
+{
+  "name": "@copytrade/execution",
+  "version": "1.0.0",
+  "private": true,
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+  "dependencies": {
+    "@copytrade/blockchain": "*",
+    "@copytrade/core": "*",
+    "@copytrade/database": "*",
+    "bs58": "^6.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0"
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "name": "@copytrade/blockchain",
+  "version": "1.0.0",
+  "private": true,
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+  "dependencies": {
+    "@copytrade/core": "*",
+    "@copytrade/common": "*",
+    "@solana/web3.js": "^1.91.4",
+    "ws": "^8.16.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0",
+    "@types/ws": "^8.5.10"
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "name": "@copytrade/worker",
+  "version": "1.0.0",
+  "private": true,
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@copytrade/blockchain": "*",
+    "@copytrade/common": "*",
+    "@copytrade/core": "*",
+    "@copytrade/database": "*",
+    "@copytrade/execution": "*",
+    "@solana/web3.js": "^1.91.4",
+    "bullmq": "^4.0.0",
+    "dotenv": "^16.0.3",
+    "ioredis": "^5.11.1",
+    "telegraf": "^4.15.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0"
+  }
+}

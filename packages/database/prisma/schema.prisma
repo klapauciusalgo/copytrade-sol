@@ -1,0 +1,83 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(uuid())
+  telegramId String   @unique
+  username  String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  wallets   Wallet[]
+  settings  UserSettings?
+}
+
+model UserSettings {
+  id        String   @id @default(uuid())
+  userId    String   @unique
+  user      User     @relation(fields: [userId], references: [id])
+  
+  defaultSlippage Float @default(1.0)
+  priorityFee     Float @default(0.001)
+  
+  updatedAt DateTime @updatedAt
+}
+
+model Wallet {
+  id             String   @id @default(uuid())
+  userId         String
+  user           User     @relation(fields: [userId], references: [id])
+  
+  publicKey      String   @unique
+  encryptedSecret String  // AES-256 encrypted
+  iv             String   // Initialization vector for AES
+  
+  label          String?
+  isDefault      Boolean  @default(false)
+  
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  
+  copyTargets    CopyTarget[]
+}
+
+model CopyTarget {
+  id             String   @id @default(uuid())
+  walletId       String
+  wallet         Wallet   @relation(fields: [walletId], references: [id])
+  
+  targetAddress  String
+  label          String?
+  
+  status         CopyStatus @default(ACTIVE)
+  mode           CopyMode   @default(COPY)
+  strategy       CopyStrategy @default(FIXED)
+  fixedAmount    Float?   // Amount in SOL if FIXED
+  ratio          Float?   // Ratio if RATIO
+  
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([walletId, targetAddress])
+}
+
+enum CopyStatus {
+  ACTIVE
+  PAUSED
+}
+
+enum CopyMode {
+  COPY
+  MONITOR
+}
+
+enum CopyStrategy {
+  FIXED
+  RATIO
+}
