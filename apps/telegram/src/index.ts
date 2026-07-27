@@ -221,10 +221,15 @@ bot.action('manage_targets', async (ctx) => {
     user.wallets[0].copyTargets.forEach((t, i) => {
       const mode = (t as any).mode || 'COPY';
       const modeEmoji: Record<string, string> = { COPY: '📋', MONITOR: '👁️', DRY_RUN: '🧪' };
-      targetText += `${i+1}. <code>${t.targetAddress}</code>\nStatus: ${t.status} | Mode: <b>${modeEmoji[mode] || ''} ${mode}</b>\n`;
+      const strategy = t.strategy || 'FIXED';
+      const sizeLabel = strategy === 'FIXED'
+        ? `📌 ${t.fixedAmount ?? 0.1} SOL`
+        : `📊 ${((t.ratio ?? 1) * 100).toFixed(0)}% of target`;
+      targetText += `${i+1}. <code>${t.targetAddress}</code>\nMode: <b>${modeEmoji[mode]} ${mode}</b> | Size: <b>${sizeLabel}</b>\n`;
       inlineKeyboard.push([
-        { text: `💼 Target ${i+1} Portfolio`, callback_data: `port_${t.targetAddress}` },
-        { text: `🔄 Toggle Mode`, callback_data: `toggle_mode_${t.targetAddress}` }
+        { text: `💼 Portfolio`, callback_data: `port_${t.targetAddress}` },
+        { text: `🔄 Mode`, callback_data: `toggle_mode_${t.targetAddress}` },
+        { text: `⚖️ Order Size`, callback_data: `target_settings_${t.targetAddress}` }
       ]);
     });
     targetText += '\n<i>To add a new target, simply reply with their Solana Address in this chat.</i>';
@@ -238,6 +243,68 @@ bot.action('manage_targets', async (ctx) => {
     parse_mode: 'HTML',
     reply_markup: { inline_keyboard: inlineKeyboard }
   }).catch(() => {});
+});
+
+// ─── Target Order Size Settings ──────────────────────────────────────────────
+bot.action(/^target_settings_(.+)$/, async (ctx) => {
+  const targetAddress = ctx.match[1];
+  const telegramId = ctx.from?.id.toString() || '';
+
+  const user = await prisma.user.findUnique({
+    where: { telegramId },
+    include: { wallets: { include: { copyTargets: true } } }
+  });
+  if (!user || user.wallets.length === 0) return ctx.answerCbQuery('Wallet not found');
+  const target = user.wallets[0].copyTargets.find((t: any) => t.targetAddress === targetAddress);
+  if (!target) return ctx.answerCbQuery('Target not found');
+
+  const strategy = target.strategy || 'FIXED';
+  const currentFixed = target.fixedAmount ?? 0.1;
+  const currentRatio = target.ratio ?? 0.1;
+
+  const text = `⚖️ <b>Order Size Settings</b>\n\n` +
+    `🎯 <b>Target:</b> <code>${targetAddress}</code>\n\n` +
+    `<b>Current Strategy:</b> ${strategy === 'FIXED' ? '📌 Fixed Amount' : '📊 % of Target'}\n` +
+    (strategy === 'FIXED'
+      ? `<b>Amount:</b> ${currentFixed} SOL per trade\n`
+      : `<b>Ratio:</b> ${(currentRatio * 100).toFixed(0)}% of target\'s buy size\n`) +
+    `\n<b>Choose a strategy below:</b>`;
+
+  await ctx.answerCbQuery();
+  await ctx.editMessageText(text, {
+    parse_mode: 'HTML',
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: '📌 Fixed Amount (SOL)', callback_data: `set_fixed_${targetAddress}` }],
+        [{ text: '📊 % of Target\'s Buy', callback_data: `set_ratio_${targetAddress}` }],
+        [{ text: '🔙 Back to Targets', callback_data: 'manage_targets' }]
+      ]
+    }
+  }).catch(() => {});
+});
+
+// User selects Fixed strategy — prompt for SOL amount
+bot.action(/^set_fixed_(.+)$/, async (ctx) => {
+  const targetAddress = ctx.match[1];
+  const telegramId = ctx.from?.id.toString() || '';
+  userSessions.set(telegramId, { state: `awaiting_fixed_${targetAddress}` });
+  await ctx.answerCbQuery();
+  await ctx.editMessageText(
+    `📌 <b>Fixed Amount Strategy</b>\n\nEnter the amount of <b>SOL</b> to use per trade.\n\n<i>Example: <code>0.1</code> means buy 0.1 SOL worth each time the target buys.</i>\n\nSend /cancel to abort.`,
+    { parse_mode: 'HTML', reply_markup: { inline_keyboard: [] } }
+  ).catch(() => {});
+});
+
+// User selects Ratio strategy — prompt for percentage
+bot.action(/^set_ratio_(.+)$/, async (ctx) => {
+  const targetAddress = ctx.match[1];
+  const telegramId = ctx.from?.id.toString() || '';
+  userSessions.set(telegramId, { state: `awaiting_ratio_${targetAddress}` });
+  await ctx.answerCbQuery();
+  await ctx.editMessageText(
+    `📊 <b>Percentage Strategy</b>\n\nEnter the <b>percentage</b> of the target\'s buy size to mirror.\n\n<i>Example: <code>10</code> means if the target buys 5 SOL, you buy 0.5 SOL (10%).</i>\n\nSend /cancel to abort.`,
+    { parse_mode: 'HTML', reply_markup: { inline_keyboard: [] } }
+  ).catch(() => {});
 });
 
 bot.action(/^port_(.+)$/, async (ctx) => {
@@ -420,6 +487,59 @@ bot.on('text', async (ctx, next) => {
       console.error('Import wallet error:', err);
       return ctx.reply('❌ Failed to import wallet. Please check your private key and try again.');
     }
+  }
+
+  // ─── Handle Fixed SOL Amount Input ───────────────────────────────────────
+  if (session?.state?.startsWith('awaiting_fixed_')) {
+    const targetAddress = session.state.replace('awaiting_fixed_', '');
+    userSessions.delete(telegramId);
+
+    const amount = parseFloat(text);
+    if (isNaN(amount) || amount <= 0 || amount > 1000) {
+      return ctx.reply('❌ Invalid amount. Please enter a positive number (e.g. <code>0.1</code>).', { parse_mode: 'HTML' });
+    }
+
+    const user = await prisma.user.findUnique({ where: { telegramId }, include: { wallets: { include: { copyTargets: true } } } });
+    if (!user || user.wallets.length === 0) return ctx.reply('❌ Wallet not found.');
+
+    const target = user.wallets[0].copyTargets.find((t: any) => t.targetAddress === targetAddress);
+    if (!target) return ctx.reply('❌ Target not found.');
+
+    await prisma.copyTarget.update({
+      where: { id: target.id },
+      data: { strategy: 'FIXED', fixedAmount: amount, ratio: null }
+    });
+
+    return ctx.replyWithHTML(
+      `✅ <b>Order Size Updated!</b>\n\n🎯 <b>Target:</b> <code>${targetAddress}</code>\n📌 <b>Strategy:</b> Fixed Amount\n💰 <b>Amount:</b> ${amount} SOL per trade`
+    );
+  }
+
+  // ─── Handle Ratio (%) Input ───────────────────────────────────────────────
+  if (session?.state?.startsWith('awaiting_ratio_')) {
+    const targetAddress = session.state.replace('awaiting_ratio_', '');
+    userSessions.delete(telegramId);
+
+    const pct = parseFloat(text);
+    if (isNaN(pct) || pct <= 0 || pct > 100) {
+      return ctx.reply('❌ Invalid percentage. Enter a number between <code>0.1</code> and <code>100</code>.', { parse_mode: 'HTML' });
+    }
+
+    const ratio = pct / 100;
+    const user = await prisma.user.findUnique({ where: { telegramId }, include: { wallets: { include: { copyTargets: true } } } });
+    if (!user || user.wallets.length === 0) return ctx.reply('❌ Wallet not found.');
+
+    const target = user.wallets[0].copyTargets.find((t: any) => t.targetAddress === targetAddress);
+    if (!target) return ctx.reply('❌ Target not found.');
+
+    await prisma.copyTarget.update({
+      where: { id: target.id },
+      data: { strategy: 'RATIO', ratio, fixedAmount: null }
+    });
+
+    return ctx.replyWithHTML(
+      `✅ <b>Order Size Updated!</b>\n\n🎯 <b>Target:</b> <code>${targetAddress}</code>\n📊 <b>Strategy:</b> ${pct}% of target's buy\n\n<i>Example: if target buys 10 SOL, you buy ${(10 * ratio).toFixed(2)} SOL.</i>`
+    );
   }
 
   // ─── Handle Solana Address → Add Copy Target ─────────────────────────────
