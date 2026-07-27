@@ -15,7 +15,10 @@ if (!botToken || botToken === 'your_bot_token') {
 const bot = new Telegraf(botToken);
 const prisma = new PrismaClient();
 
-import { mainMenu, settingsMenu, backToMain } from './menus';
+import { mainMenu, walletMenu, settingsMenu, backToMain } from './menus';
+
+// In-memory session store for multi-step interactions (import wallet)
+const userSessions = new Map<string, { state: string }>();
 
 bot.start(async (ctx) => {
   const telegramId = ctx.from?.id.toString();
@@ -66,17 +69,94 @@ bot.action('manage_wallet', async (ctx) => {
   const telegramId = ctx.from?.id.toString() || '';
   const user = await prisma.user.findUnique({ where: { telegramId }, include: { wallets: true } });
   
+  let walletText = '👛 <b>Wallet Management</b>\n\n';
   if (user && user.wallets.length > 0) {
     const pubKey = user.wallets[0].publicKey;
-    await ctx.editMessageText(`👛 <b>Wallet Management</b>\n\nActive Wallet:\n<code>${pubKey}</code>\n\n<i>Fund this address with SOL to pay for trades and fees.</i>`, {
-      parse_mode: 'HTML',
-      ...backToMain
-    }).catch(() => {});
+    walletText += `<b>Active Wallet:</b>\n<code>${pubKey}</code>\n\n<i>Fund this address with SOL to pay for trades and fees.</i>`;
   } else {
-    await ctx.editMessageText('👛 <b>Wallet Management</b>\n\nNo active wallets found. Use /generate to create one.', {
-      parse_mode: 'HTML',
-      ...backToMain
-    }).catch(() => {});
+    walletText += 'No wallet found. Generate a new one or import an existing wallet.';
+  }
+  
+  await ctx.editMessageText(walletText, {
+    parse_mode: 'HTML',
+    ...walletMenu
+  }).catch(() => {});
+});
+
+// Generate wallet from menu button
+bot.action('wallet_generate', async (ctx) => {
+  const telegramId = ctx.from?.id.toString();
+  if (!telegramId) return ctx.answerCbQuery('Error: Unknown Telegram ID.');
+
+  const user = await prisma.user.findUnique({ where: { telegramId }, include: { wallets: true } });
+
+  if (user && user.wallets.length > 0) {
+    await ctx.answerCbQuery('You already have an active wallet!');
+    return ctx.editMessageText(
+      `⚠️ <b>Wallet already exists!</b>\n\n<code>${user.wallets[0].publicKey}</code>\n\n<i>Export your current key first before generating a new one.</i>`,
+      { parse_mode: 'HTML', ...walletMenu }
+    ).catch(() => {});
+  }
+
+  await ctx.answerCbQuery('Generating wallet...');
+
+  const keypair = Keypair.generate();
+  const pubKey = keypair.publicKey.toBase58();
+  const secretStr = bs58.encode(keypair.secretKey);
+  const { encryptedData, iv } = encrypt(secretStr);
+
+  await prisma.wallet.create({
+    data: { userId: user!.id, publicKey: pubKey, encryptedSecret: encryptedData, iv }
+  });
+
+  await ctx.editMessageText(
+    `✅ <b>Wallet Generated!</b>\n\nPublic Key:\n<code>${pubKey}</code>\n\n<i>Fund this address with SOL before adding copy targets.</i>`,
+    { parse_mode: 'HTML', ...walletMenu }
+  ).catch(() => {});
+});
+
+// Trigger import flow
+bot.action('wallet_import', async (ctx) => {
+  const telegramId = ctx.from?.id.toString();
+  if (!telegramId) return ctx.answerCbQuery();
+
+  const user = await prisma.user.findUnique({ where: { telegramId }, include: { wallets: true } });
+  if (user && user.wallets.length > 0) {
+    await ctx.answerCbQuery('You already have an active wallet!');
+    return ctx.editMessageText(
+      `⚠️ <b>Wallet already exists!</b>\n\n<code>${user.wallets[0].publicKey}</code>\n\nYou currently cannot import while a wallet is active. Export and delete it first.`,
+      { parse_mode: 'HTML', ...walletMenu }
+    ).catch(() => {});
+  }
+
+  userSessions.set(telegramId, { state: 'awaiting_private_key' });
+  await ctx.answerCbQuery();
+  await ctx.editMessageText(
+    '📥 <b>Import Wallet</b>\n\n🔐 Please send your <b>Base58 private key</b> in the next message.\n\n⚠️ <i>This message will be processed securely and your key will be encrypted immediately. Never share your private key with anyone.</i>\n\n<i>Send /cancel to abort.</i>',
+    { parse_mode: 'HTML', reply_markup: { inline_keyboard: [] } }
+  ).catch(() => {});
+});
+
+// Export wallet from menu button
+bot.action('wallet_export', async (ctx) => {
+  const telegramId = ctx.from?.id.toString();
+  if (!telegramId) return ctx.answerCbQuery();
+
+  const user = await prisma.user.findUnique({ where: { telegramId }, include: { wallets: true } });
+  if (!user || user.wallets.length === 0) {
+    await ctx.answerCbQuery('No wallet to export!');
+    return;
+  }
+
+  const wallet = user.wallets[0];
+  try {
+    const privateKey = decrypt(wallet.encryptedSecret, wallet.iv);
+    await ctx.answerCbQuery();
+    await ctx.replyWithHTML(
+      `⚠️ <b>DANGER ZONE</b> ⚠️\n\nHere is your Private Key. <b>DO NOT SHARE THIS WITH ANYONE!</b>\nAnyone with this key can steal all your funds.\n\n<code>${privateKey}</code>\n\n<i>Import this key into Phantom or Solflare.</i>`
+    );
+  } catch (err) {
+    await ctx.answerCbQuery('Decryption failed!');
   }
 });
 
@@ -227,41 +307,87 @@ bot.command('generate', async (ctx) => {
   }
 });
 
-// Text listener for adding target wallets
+// Cancel command for aborting multi-step flows
+bot.command('cancel', async (ctx) => {
+  const telegramId = ctx.from?.id.toString();
+  if (telegramId && userSessions.has(telegramId)) {
+    userSessions.delete(telegramId);
+    return ctx.reply('❌ Action cancelled.');
+  }
+  return ctx.reply('Nothing to cancel.');
+});
+
+// Text listener — handles import private key AND adding target wallets
 bot.on('text', async (ctx, next) => {
   const text = ctx.message.text.trim();
   const telegramId = ctx.from?.id.toString();
-  
-  // Quick regex for a Solana Base58 address (approximate)
+  if (!telegramId) return next();
+
+  const session = userSessions.get(telegramId);
+
+  // ─── Handle Private Key Import ───────────────────────────────────────────
+  if (session?.state === 'awaiting_private_key') {
+    userSessions.delete(telegramId); // Clear session immediately
+
+    // Attempt to delete user's message so private key isn't visible in chat
+    await ctx.deleteMessage().catch(() => {});
+
+    try {
+      // Validate the key by trying to load it as a Keypair
+      let secretBytes: Uint8Array;
+      try {
+        secretBytes = bs58.decode(text);
+        if (secretBytes.length !== 64) throw new Error('Invalid length');
+      } catch {
+        return ctx.reply('❌ <b>Invalid private key!</b>\n\nMake sure you are sending a Base58-encoded private key (88 characters).', { parse_mode: 'HTML' });
+      }
+
+      const keypair = Keypair.fromSecretKey(secretBytes);
+      const pubKey = keypair.publicKey.toBase58();
+      const secretStr = bs58.encode(keypair.secretKey);
+      const { encryptedData, iv } = encrypt(secretStr);
+
+      const user = await prisma.user.findUnique({ where: { telegramId }, include: { wallets: true } });
+      if (!user) return ctx.reply('❌ User not found. Please send /start first.');
+      if (user.wallets.length > 0) return ctx.reply('❌ You already have an active wallet. Cannot import.');
+
+      // Check if this wallet is already registered to another user
+      const existingWallet = await prisma.wallet.findUnique({ where: { publicKey: pubKey } });
+      if (existingWallet) {
+        return ctx.reply('❌ This wallet is already linked to an account.', { parse_mode: 'HTML' });
+      }
+
+      await prisma.wallet.create({
+        data: { userId: user.id, publicKey: pubKey, encryptedSecret: encryptedData, iv }
+      });
+
+      return ctx.replyWithHTML(
+        `✅ <b>Wallet Imported Successfully!</b>\n\nPublic Key:\n<code>${pubKey}</code>\n\n<i>Your private key has been encrypted and stored securely. Fund this address with SOL before adding copy targets.</i>`
+      );
+    } catch (err) {
+      console.error('Import wallet error:', err);
+      return ctx.reply('❌ Failed to import wallet. Please check your private key and try again.');
+    }
+  }
+
+  // ─── Handle Solana Address → Add Copy Target ─────────────────────────────
   const solanaAddressRegex = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
   if (solanaAddressRegex.test(text)) {
-    if (!telegramId) return;
     const user = await prisma.user.findUnique({ where: { telegramId }, include: { wallets: true }});
     
     if (!user || user.wallets.length === 0) {
-      return ctx.reply('❌ You must /generate a wallet first before adding targets.');
+      return ctx.reply('❌ You must generate or import a wallet first before adding targets.');
     }
     
     const walletId = user.wallets[0].id;
     
-    // Check if it exists
-    const existing = await prisma.copyTarget.findFirst({
-      where: { walletId, targetAddress: text }
-    });
-    
+    const existing = await prisma.copyTarget.findFirst({ where: { walletId, targetAddress: text } });
     if (existing) {
       return ctx.reply(`⚠️ Target <code>${text}</code> is already in your active list.`, { parse_mode: 'HTML' });
     }
     
-    // Add new target
     await prisma.copyTarget.create({
-      data: {
-        walletId,
-        targetAddress: text,
-        status: 'ACTIVE',
-        strategy: 'FIXED',
-        fixedAmount: 0.1 // Default size
-      }
+      data: { walletId, targetAddress: text, status: 'ACTIVE', strategy: 'FIXED', fixedAmount: 0.1 }
     });
     
     return ctx.reply(`✅ <b>Target Added!</b>\n\nYou are now automatically copying:\n<code>${text}</code>\n\nDefault Trade Size: 0.1 SOL.`, { parse_mode: 'HTML' });

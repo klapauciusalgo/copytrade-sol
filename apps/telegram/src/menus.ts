@@ -7,6 +7,13 @@ export const mainMenu = Markup.inlineKeyboard([
   [Markup.button.callback('⚙️ Settings', 'view_settings')],
 ]);
 
+export const walletMenu = Markup.inlineKeyboard([
+  [Markup.button.callback('🆕 Generate New Wallet', 'wallet_generate')],
+  [Markup.button.callback('📥 Import Wallet', 'wallet_import')],
+  [Markup.button.callback('📤 Export Private Key', 'wallet_export')],
+  [Markup.button.callback('🔙 Back to Main', 'main_menu')],
+]);
+
 export const settingsMenu = Markup.inlineKeyboard([
   [Markup.button.callback('Set Slippage', 'set_slippage')],
   [Markup.button.callback('Set Priority Fee', 'set_fee')],
