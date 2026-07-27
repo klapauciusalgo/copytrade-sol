@@ -119,13 +119,14 @@ const worker = new Worker('executionQueue', async (job) => {
         }
 
         const solToSpend = req.amountSolIn ?? userWallet.user.settings.dryRunEquitySol * 0.1;
+        const myTokenAmount = event.price > 0 ? solToSpend / event.price : event.amount;
 
         let result;
         if (req.action === 'BUY') {
           result = await dryRunEngine.processBuy(
             req.walletId, userWallet.userId, event.wallet,
             req.tokenMint, tokenSymbol,
-            solToSpend, event.amount, event.price
+            solToSpend, myTokenAmount, event.price
           );
         } else {
           result = await dryRunEngine.processSell(
