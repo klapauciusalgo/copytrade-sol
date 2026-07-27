@@ -25,6 +25,7 @@ model UserSettings {
   
   defaultSlippage Float @default(1.0)
   priorityFee     Float @default(0.001)
+  dryRunEquitySol Float @default(1.0)  // Virtual equity in SOL for dry-run mode
   
   updatedAt DateTime @updatedAt
 }
@@ -44,7 +45,8 @@ model Wallet {
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
   
-  copyTargets    CopyTarget[]
+  copyTargets     CopyTarget[]
+  dryRunPositions DryRunPosition[]
 }
 
 model CopyTarget {
@@ -55,8 +57,8 @@ model CopyTarget {
   targetAddress  String
   label          String?
   
-  status         CopyStatus @default(ACTIVE)
-  mode           CopyMode   @default(COPY)
+  status         CopyStatus   @default(ACTIVE)
+  mode           CopyMode     @default(COPY)
   strategy       CopyStrategy @default(FIXED)
   fixedAmount    Float?   // Amount in SOL if FIXED
   ratio          Float?   // Ratio if RATIO
@@ -67,6 +69,24 @@ model CopyTarget {
   @@unique([walletId, targetAddress])
 }
 
+model DryRunPosition {
+  id             String   @id @default(uuid())
+  walletId       String
+  wallet         Wallet   @relation(fields: [walletId], references: [id])
+  targetAddress  String
+  tokenMint      String
+  tokenSymbol    String   @default("")
+  
+  virtualSolSpent Float   // SOL "spent" to buy this position
+  tokenAmount     Float   // Virtual token quantity held
+  buyPriceSol     Float   // Average entry price per token in SOL
+
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([walletId, targetAddress, tokenMint])
+}
+
 enum CopyStatus {
   ACTIVE
   PAUSED
@@ -75,6 +95,7 @@ enum CopyStatus {
 enum CopyMode {
   COPY
   MONITOR
+  DRY_RUN
 }
 
 enum CopyStrategy {

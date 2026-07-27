@@ -219,7 +219,9 @@ bot.action('manage_targets', async (ctx) => {
   if (user && user.wallets.length > 0 && user.wallets[0].copyTargets.length > 0) {
     targetText += '<b>Active Targets:</b>\n';
     user.wallets[0].copyTargets.forEach((t, i) => {
-      targetText += `${i+1}. <code>${t.targetAddress}</code>\nStatus: ${t.status} | Mode: <b>${(t as any).mode || 'COPY'}</b>\n`;
+      const mode = (t as any).mode || 'COPY';
+      const modeEmoji: Record<string, string> = { COPY: '📋', MONITOR: '👁️', DRY_RUN: '🧪' };
+      targetText += `${i+1}. <code>${t.targetAddress}</code>\nStatus: ${t.status} | Mode: <b>${modeEmoji[mode] || ''} ${mode}</b>\n`;
       inlineKeyboard.push([
         { text: `💼 Target ${i+1} Portfolio`, callback_data: `port_${t.targetAddress}` },
         { text: `🔄 Toggle Mode`, callback_data: `toggle_mode_${t.targetAddress}` }
@@ -299,7 +301,8 @@ bot.action('view_settings', async (ctx) => {
   const telegramId = ctx.from?.id.toString() || '';
   const user = await prisma.user.findUnique({ where: { telegramId }, include: { settings: true }});
   
-  const text = `⚙️ <b>Global Settings</b>\n\nSlippage: ${user?.settings?.defaultSlippage || 1.0}%\nPriority Fee: ${user?.settings?.priorityFee || 0.001} SOL`;
+  const dryEquity = user?.settings?.dryRunEquitySol ?? 1.0;
+  const text = `⚙️ <b>Global Settings</b>\n\nSlippage: ${user?.settings?.defaultSlippage || 1.0}%\nPriority Fee: ${user?.settings?.priorityFee || 0.001} SOL\n🧪 Dry Run Equity: ${dryEquity} SOL\n\n<i>To change dry run equity, use /setdryequity [amount]\nExample: /setdryequity 2.5</i>`;
   
   await ctx.editMessageText(text, {
     parse_mode: 'HTML',
@@ -553,7 +556,11 @@ bot.action(/^toggle_mode_(.+)$/, async (ctx) => {
   const target = user.wallets[0].copyTargets.find((t: any) => t.targetAddress === targetAddress);
   if (!target) return ctx.answerCbQuery('Target not found');
 
-  const newMode = (target as any).mode === 'MONITOR' ? 'COPY' : 'MONITOR';
+  // Rotate: COPY → MONITOR → DRY_RUN → COPY
+  const modeOrder = ['COPY', 'MONITOR', 'DRY_RUN'];
+  const currentIdx = modeOrder.indexOf((target as any).mode || 'COPY');
+  const newMode = modeOrder[(currentIdx + 1) % modeOrder.length];
+
   await prisma.copyTarget.update({
     where: { id: target.id },
     data: { mode: newMode as any }
@@ -562,6 +569,7 @@ bot.action(/^toggle_mode_(.+)$/, async (ctx) => {
   await ctx.answerCbQuery(`Mode changed to ${newMode}`);
   
   // Refresh the menu
+  const modeEmoji: Record<string, string> = { COPY: '📋', MONITOR: '👁️', DRY_RUN: '🧪' };
   let targetText = '🎯 <b>Target Wallets</b>\n\n<b>Active Targets:</b>\n';
   let inlineKeyboard: any[] = [];
   
@@ -572,7 +580,8 @@ bot.action(/^toggle_mode_(.+)$/, async (ctx) => {
   
   if (updatedUser && updatedUser.wallets.length > 0) {
     updatedUser.wallets[0].copyTargets.forEach((t: any, i: number) => {
-      targetText += `${i+1}. <code>${t.targetAddress}</code>\nStatus: ${t.status} | Mode: <b>${t.mode || 'COPY'}</b>\n`;
+      const mode = t.mode || 'COPY';
+      targetText += `${i+1}. <code>${t.targetAddress}</code>\nStatus: ${t.status} | Mode: <b>${modeEmoji[mode] || ''} ${mode}</b>\n`;
       inlineKeyboard.push([
         { text: `💼 Target ${i+1} Portfolio`, callback_data: `port_${t.targetAddress}` },
         { text: `🔄 Toggle Mode`, callback_data: `toggle_mode_${t.targetAddress}` }
@@ -587,6 +596,96 @@ bot.action(/^toggle_mode_(.+)$/, async (ctx) => {
     parse_mode: 'HTML',
     reply_markup: { inline_keyboard: inlineKeyboard }
   }).catch(() => {});
+});
+
+// /dryportfolio — show virtual open positions
+bot.command('dryportfolio', async (ctx) => {
+  const telegramId = ctx.from?.id.toString();
+  if (!telegramId) return;
+
+  const user = await prisma.user.findUnique({
+    where: { telegramId },
+    include: { wallets: { include: { dryRunPositions: true } }, settings: true }
+  });
+
+  if (!user || user.wallets.length === 0) {
+    return ctx.reply('❌ No wallet found. Use /start first.');
+  }
+
+  const positions = user.wallets[0].dryRunPositions;
+  const equity = (user.settings as any)?.dryRunEquitySol ?? 1.0;
+
+  let msg = `🧪 <b>Dry Run Portfolio</b>\n\n💰 <b>Virtual Equity Available:</b> ${equity.toFixed(4)} SOL\n\n`;
+
+  if (positions.length === 0) {
+    msg += '<i>No open positions. Start tracking a target in DRY_RUN mode!</i>';
+  } else {
+    msg += `<b>Open Positions (${positions.length}):</b>\n`;
+    for (const pos of positions) {
+      const short = `${pos.tokenMint.slice(0, 4)}...${pos.tokenMint.slice(-4)}`;
+      msg += `\n🪙 <b>${pos.tokenSymbol || short}</b>\n   Entry: ${pos.virtualSolSpent.toFixed(4)} SOL @ ${pos.buyPriceSol.toExponential(2)} SOL/token\n   🎯 Target: <code>${pos.targetAddress}</code>\n`;
+    }
+  }
+
+  msg += `\n<i>To reset portfolio, use the button below.</i>`;
+
+  await ctx.replyWithHTML(msg, {
+    reply_markup: {
+      inline_keyboard: [[{ text: '🔄 Reset Dry Run Portfolio', callback_data: 'dryrun_reset' }]]
+    }
+  });
+});
+
+// /setdryequity — set virtual equity
+bot.command('setdryequity', async (ctx) => {
+  const telegramId = ctx.from?.id.toString();
+  if (!telegramId) return;
+
+  const args = ctx.message.text.split(' ');
+  const amount = parseFloat(args[1]);
+
+  if (isNaN(amount) || amount <= 0) {
+    return ctx.reply('❌ Invalid amount.\n\nUsage: <code>/setdryequity 2.5</code>\nExample sets virtual equity to 2.5 SOL.', { parse_mode: 'HTML' });
+  }
+
+  const user = await prisma.user.findUnique({ where: { telegramId }, include: { settings: true } });
+  if (!user || !user.settings) {
+    return ctx.reply('❌ User settings not found. Please send /start first.');
+  }
+
+  await prisma.userSettings.update({
+    where: { userId: user.id },
+    data: { dryRunEquitySol: amount }
+  });
+
+  return ctx.replyWithHTML(`✅ <b>Dry Run Equity Updated!</b>\n\nVirtual equity set to <b>${amount} SOL</b>.\n\n<i>Note: This only changes your available equity. Open positions are not affected. Use /dryportfolio to reset.</i>`);
+});
+
+// Reset dry run portfolio
+bot.action('dryrun_reset', async (ctx) => {
+  const telegramId = ctx.from?.id.toString();
+  if (!telegramId) return ctx.answerCbQuery();
+
+  const user = await prisma.user.findUnique({
+    where: { telegramId },
+    include: { wallets: true, settings: true }
+  });
+
+  if (!user || user.wallets.length === 0) {
+    return ctx.answerCbQuery('No wallet found!');
+  }
+
+  const walletId = user.wallets[0].id;
+  const resetEquity = (user.settings as any)?.dryRunEquitySol ?? 1.0;
+
+  // Close all open positions and restore equity to current configured value
+  await prisma.dryRunPosition.deleteMany({ where: { walletId } });
+
+  await ctx.answerCbQuery('Portfolio reset!');
+  await ctx.editMessageText(
+    `✅ <b>Dry Run Portfolio Reset!</b>\n\nAll open positions have been closed.\nVirtual equity restored to <b>${resetEquity.toFixed(4)} SOL</b>.\n\n<i>Use /setdryequity to change the equity amount.</i>`,
+    { parse_mode: 'HTML', reply_markup: { inline_keyboard: [] } }
+  ).catch(() => {});
 });
 
 bot.launch().then(() => {

@@ -8,7 +8,7 @@ export interface ExecutionRequest {
   amountTokenIn?: number;
   slippageBps: number;
   priorityFee: number;
-  mode: 'COPY' | 'MONITOR';
+  mode: 'COPY' | 'MONITOR' | 'DRY_RUN';
 }
 
 export function validateRisk(

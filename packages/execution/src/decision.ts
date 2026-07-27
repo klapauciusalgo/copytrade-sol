@@ -53,7 +53,7 @@ export class DecisionEngine {
         amountTokenIn: event.action === 'SELL' ? event.amount * (target.ratio || 1) : undefined,
         slippageBps: userSettings.defaultSlippage * 100, // e.g. 1% = 100 bps
         priorityFee: userSettings.priorityFee,
-        mode: target.mode as 'COPY' | 'MONITOR'
+        mode: target.mode as 'COPY' | 'MONITOR' | 'DRY_RUN'
       });
     }
 
