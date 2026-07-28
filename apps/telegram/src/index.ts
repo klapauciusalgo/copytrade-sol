@@ -718,7 +718,7 @@ bot.action(/^toggle_mode_(.+)$/, async (ctx) => {
   }).catch(() => {});
 });
 
-// /dryportfolio — show virtual open positions
+// /dryportfolio — show virtual open positions with live market valuation
 bot.command('dryportfolio', async (ctx) => {
   const telegramId = ctx.from?.id.toString();
   if (!telegramId) return;
@@ -735,25 +735,86 @@ bot.command('dryportfolio', async (ctx) => {
   const positions = user.wallets[0].dryRunPositions;
   const equity = (user.settings as any)?.dryRunEquitySol ?? 1.0;
 
-  let msg = `🧪 <b>Dry Run Portfolio</b>\n\n💰 <b>Virtual Equity Available:</b> ${equity.toFixed(4)} SOL\n\n`;
-
   if (positions.length === 0) {
-    msg += '<i>No open positions. Start tracking a target in DRY_RUN mode!</i>';
-  } else {
-    msg += `<b>Open Positions (${positions.length}):</b>\n`;
-    for (const pos of positions) {
-      const short = `${pos.tokenMint.slice(0, 4)}...${pos.tokenMint.slice(-4)}`;
-      msg += `\n🪙 <b>${pos.tokenSymbol || short}</b>\n   Entry: ${pos.virtualSolSpent.toFixed(4)} SOL @ ${pos.buyPriceSol.toExponential(2)} SOL/token\n   🎯 Target: <code>${pos.targetAddress}</code>\n`;
-    }
+    const msg = `🧪 <b>Dry Run Portfolio</b>\n\n💰 <b>Available Virtual Equity:</b> ${equity.toFixed(4)} SOL\n📈 <b>Open Positions Value:</b> 0.0000 SOL\n💼 <b>Total Net Worth:</b> ${equity.toFixed(4)} SOL\n\n<i>No open positions. Start tracking a target in DRY_RUN mode!</i>`;
+    return ctx.replyWithHTML(msg, {
+      reply_markup: {
+        inline_keyboard: [[{ text: '🔄 Reset Dry Run Portfolio', callback_data: 'dryrun_reset' }]]
+      }
+    });
   }
 
+  const statusMsg = await ctx.reply('⏳ Calculating live valuation for held tokens & P&L...');
+
+  // Get current SOL price
+  let solPriceUsd = 150;
+  try {
+    const solRes = await fetch('https://api.dexscreener.com/latest/dex/tokens/So11111111111111111111111111111111111111112').catch(() => null);
+    if (solRes) {
+      const data = await solRes.json();
+      const solPair = data.pairs?.find((p: any) => p.chainId === 'solana' && (p.quoteToken.symbol === 'USDC' || p.quoteToken.symbol === 'USDT'));
+      if (solPair?.priceUsd) solPriceUsd = parseFloat(solPair.priceUsd);
+    }
+  } catch (e) {}
+
+  let totalPositionsValueSol = 0;
+  let totalSpentSol = 0;
+  let positionsText = '';
+
+  // Fetch live prices for held tokens
+  await Promise.all(
+    positions.map(async (pos) => {
+      let currentPriceSol = pos.buyPriceSol;
+      try {
+        const tokenRes = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${pos.tokenMint}`).catch(() => null);
+        if (tokenRes) {
+          const data = await tokenRes.json();
+          const pair = data.pairs?.find((p: any) => p.chainId === 'solana') || data.pairs?.[0];
+          if (pair?.priceNative) {
+            currentPriceSol = parseFloat(pair.priceNative);
+          }
+        }
+      } catch (e) {}
+
+      const currentValueSol = pos.tokenAmount * currentPriceSol;
+      totalPositionsValueSol += currentValueSol;
+      totalSpentSol += pos.virtualSolSpent;
+
+      const pnlSol = currentValueSol - pos.virtualSolSpent;
+      const pnlPercent = pos.virtualSolSpent > 0 ? (pnlSol / pos.virtualSolSpent) * 100 : 0;
+      const pnlEmoji = pnlSol >= 0 ? '🟢' : '🔴';
+      const pnlSign = pnlSol >= 0 ? '+' : '';
+
+      const short = `${pos.tokenMint.slice(0, 4)}...${pos.tokenMint.slice(-4)}`;
+      const symbol = pos.tokenSymbol || short;
+
+      positionsText += `\n🪙 <b>${symbol}</b>\n   Spent: ${pos.virtualSolSpent.toFixed(4)} SOL → Current: <b>${currentValueSol.toFixed(4)} SOL</b>\n   ${pnlEmoji} P&L: <b>${pnlSign}${pnlSol.toFixed(4)} SOL (${pnlSign}${pnlPercent.toFixed(1)}%)</b>\n`;
+    })
+  );
+
+  const totalNetWorthSol = equity + totalPositionsValueSol;
+  const netWorthUsd = (totalNetWorthSol * solPriceUsd).toFixed(2);
+  const openPositionsUsd = (totalPositionsValueSol * solPriceUsd).toFixed(2);
+
+  const totalPnlSol = totalPositionsValueSol - totalSpentSol;
+  const totalPnlPercent = totalSpentSol > 0 ? (totalPnlSol / totalSpentSol) * 100 : 0;
+  const overallPnlEmoji = totalPnlSol >= 0 ? '🟢' : '🔴';
+  const overallPnlSign = totalPnlSol >= 0 ? '+' : '';
+
+  let msg = `🧪 <b>Dry Run Portfolio & Valuation</b>\n\n`;
+  msg += `💼 <b>Total Net Worth:</b> <b>${totalNetWorthSol.toFixed(4)} SOL</b> ($${netWorthUsd})\n`;
+  msg += `💰 <b>Available Virtual SOL:</b> ${equity.toFixed(4)} SOL\n`;
+  msg += `📈 <b>Held Tokens Value:</b> ${totalPositionsValueSol.toFixed(4)} SOL ($${openPositionsUsd})\n`;
+  msg += `${overallPnlEmoji} <b>Unrealized P&L:</b> <b>${overallPnlSign}${totalPnlSol.toFixed(4)} SOL (${overallPnlSign}${totalPnlPercent.toFixed(1)}%)</b>\n\n`;
+  msg += `<b>Held Tokens (${positions.length}):</b>\n${positionsText}`;
   msg += `\n<i>To reset portfolio, use the button below.</i>`;
 
-  await ctx.replyWithHTML(msg, {
+  await ctx.telegram.editMessageText(ctx.chat.id, statusMsg.message_id, undefined, msg, {
+    parse_mode: 'HTML',
     reply_markup: {
       inline_keyboard: [[{ text: '🔄 Reset Dry Run Portfolio', callback_data: 'dryrun_reset' }]]
     }
-  });
+  }).catch(() => {});
 });
 
 // /setdryequity — set virtual equity
