@@ -1,4 +1,4 @@
-import { Connection, Keypair, VersionedTransaction } from '@solana/web3.js';
+import { Connection, Keypair, PublicKey, VersionedTransaction } from '@solana/web3.js';
 import { ExecutionRequest } from './risk';
 import { Wallet } from '@copytrade/database';
 import { decrypt } from '@copytrade/common';
@@ -24,45 +24,85 @@ export class ExecutionEngine {
     const inputMint = request.action === 'BUY' ? NATIVE_SOL_MINT : request.tokenMint;
     const outputMint = request.action === 'BUY' ? request.tokenMint : NATIVE_SOL_MINT;
     
-    // Calculate raw amount. SOL has 9 decimals.
-    // For MVP SELLs, we mock 1 token unit. In production, we'd fetch the exact token balance.
-    const rawAmount = request.action === 'BUY' 
-      ? Math.floor((request.amountSolIn || 0) * 1e9) 
-      : Math.floor((request.amountTokenIn || 0) * 1e6); // Assuming 6 decimals for random tokens as fallback
+    const keypair = Keypair.fromSecretKey(bs58.decode(base58PrivateKey));
+    const userPublicKey = keypair.publicKey.toBase58();
 
-    if (rawAmount <= 0) throw new Error('Invalid amount for execution');
+    // 2. Calculate raw amount based on action and token decimals
+    let rawAmount = 0;
+    if (request.action === 'BUY') {
+      rawAmount = Math.floor((request.amountSolIn || 0) * 1e9);
+    } else {
+      // For SELLs, fetch the user's actual token balance directly from Solana RPC
+      rawAmount = await this.getRawTokenAmountForUser(userPublicKey, request.tokenMint, 1.0);
+      if (rawAmount <= 0) {
+        // Fallback to estimation if no SPL token account found
+        rawAmount = Math.floor((request.amountTokenIn || 0) * 1e6);
+      }
+    }
 
-    // 2. Fetch Quote from Jupiter
+    if (rawAmount <= 0) throw new Error('Insufficient token balance or invalid amount for execution');
+
+    // 3. Fetch Quote from Jupiter
     const quote = await this.getJupiterQuote(inputMint, outputMint, rawAmount, request.slippageBps);
     if (!quote) throw new Error('Failed to route trade via Jupiter');
 
     console.log(`[Executor] Jupiter Route found: Expected Output: ${quote.outAmount}`);
 
-    // 3. Build Transaction
-    const keypair = Keypair.fromSecretKey(bs58.decode(base58PrivateKey));
-    const tx = await this.buildJupiterTransaction(quote, keypair.publicKey.toBase58(), request.priorityFee);
+    // 4. Build Transaction
+    const tx = await this.buildJupiterTransaction(quote, userPublicKey, request.priorityFee);
 
-    // 4. Sign Transaction
+    // 5. Sign Transaction
     tx.sign([keypair]);
-    console.log(`[Executor] Transaction signed by ${keypair.publicKey.toBase58()}`);
+    console.log(`[Executor] Transaction signed by ${userPublicKey}`);
 
-    // 5. Submit Transaction
-    // For smoke testing, we won't actually broadcast unless we want a real tx. 
-    // We will just simulate it to ensure the payload is completely valid.
-    const simResult = await this.connection.simulateTransaction(tx);
-    
-    if (simResult.value.err) {
-      console.error(`[Executor] Simulation Failed:`, simResult.value.err);
-      throw new Error('Transaction Simulation Failed');
+    // 6. Submit Transaction
+    if (process.env.SIMULATE_TRADES === 'true') {
+      const simResult = await this.connection.simulateTransaction(tx);
+      if (simResult.value.err) {
+        console.error(`[Executor] Simulation Failed:`, simResult.value.err);
+        throw new Error(`Transaction Simulation Failed: ${JSON.stringify(simResult.value.err)}`);
+      }
+      console.log(`[Executor] Simulation Success! Transaction is valid.`);
+      return 'simulated_tx_' + Date.now();
     }
 
-    console.log(`[Executor] Simulation Success! Transaction is valid and ready to broadcast.`);
-    
-    // In production:
-    // const signature = await this.connection.sendTransaction(tx, { maxRetries: 3 });
-    // return signature;
-    
-    return 'mocked_success_signature_' + Date.now();
+    // Live Broadcast to Solana Mainnet
+    const rawTx = tx.serialize();
+    const signature = await this.connection.sendRawTransaction(rawTx, {
+      skipPreflight: false,
+      maxRetries: 3
+    });
+
+    console.log(`[Executor] Transaction broadcasted to Solana Mainnet! Signature: ${signature}`);
+
+    // Wait for confirmation
+    const latestBlockHash = await this.connection.getLatestBlockhash();
+    await this.connection.confirmTransaction({
+      blockhash: latestBlockHash.blockhash,
+      lastValidBlockHeight: latestBlockHash.lastValidBlockHeight,
+      signature
+    }, 'confirmed');
+
+    console.log(`[Executor] Transaction confirmed on-chain! Signature: ${signature}`);
+    return signature;
+  }
+
+  private async getRawTokenAmountForUser(userPublicKey: string, tokenMint: string, percentage: number = 1.0): Promise<number> {
+    try {
+      const pubKey = new PublicKey(userPublicKey);
+      const mintKey = new PublicKey(tokenMint);
+      const tokenAccounts = await this.connection.getParsedTokenAccountsByOwner(pubKey, { mint: mintKey });
+      if (tokenAccounts.value.length === 0) return 0;
+
+      const info = tokenAccounts.value[0].account.data.parsed.info;
+      const rawStringAmount = info.tokenAmount.amount;
+      const totalRaw = BigInt(rawStringAmount);
+      const targetRaw = BigInt(Math.floor(Number(totalRaw) * percentage));
+      return Number(targetRaw);
+    } catch (e) {
+      console.error('[Executor] Failed to get user token balance from RPC:', e);
+      return 0;
+    }
   }
 
   private async getJupiterQuote(inputMint: string, outputMint: string, amount: number, slippageBps: number) {
@@ -86,7 +126,7 @@ export class ExecutionEngine {
     });
 
     if (!response.ok) {
-        throw new Error('Failed to build swap transaction');
+      throw new Error('Failed to build swap transaction via Jupiter');
     }
 
     const { swapTransaction } = await response.json();
@@ -94,3 +134,4 @@ export class ExecutionEngine {
     return VersionedTransaction.deserialize(swapTransactionBuf);
   }
 }
+
