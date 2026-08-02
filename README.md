@@ -1,36 +1,64 @@
 # Solana Telegram Copy-Trading Bot 🚀
 
-A highly modular and robust Solana copy-trading bot integrated with Telegram. It leverages the Jupiter API for execution, BullMQ for robust job processing, and Helius/Native RPC for real-time blockchain monitoring.
+A highly modular, production-ready Solana copy-trading bot integrated with Telegram. It leverages Jupiter API v1 for execution, BullMQ for job queueing, Prisma ORM for database management, and Helius/Solana RPC for real-time blockchain monitoring.
 
-## ✨ Features
+---
 
-- **Automated Copy Trading:** Instantly copy buys and sells from target wallets.
-- **Monitor Mode (Watch Only):** Track a wallet's activity and receive Telegram alerts with real-time USD/SOL values without risking your own capital.
-- **Wallet Encryption:** User wallet secrets are encrypted at rest using AES-256-CBC.
-- **Microservice Architecture:** Separated Telegram UI and Worker backend, communicating via Redis and BullMQ.
-- **Robust Parsing:** Analyzes raw token balance changes to determine buys and sells across *any* DEX (Raydium, Pump.fun, Jupiter, etc.) without requiring specific program IDLs.
+## ✨ Key Features
+
+- **Multi-Mode Trading:**
+  - ⚡ **COPY (Live Mainnet):** Instantly copy buy and sell trades on Solana Mainnet using your encrypted wallet.
+  - 🧪 **DRY_RUN (Paper Trading):** Test strategies in a simulated virtual environment with real-time PnL tracking without risking real SOL.
+  - 👁️ **MONITOR (Watch Only):** Receive Telegram notifications of target wallet activity with USD/SOL values without executing trades.
+
+- **Auto Slippage & Smart Execution:**
+  - 📊 **Dynamic Auto Slippage:** Support for `/setslippage auto` leveraging Jupiter API dynamic slippage optimization (capped at 10% max).
+  - 🛡️ **SELL Protection:** Enforces a minimum 3.0% slippage tolerance on `SELL` orders to prevent `0x1771` (Slippage Exceeded) simulation errors during fast price drops.
+  - ⚡ **Priority Fee Customization:** Adjustable priority fee lamports to land transactions quickly on congested Solana blocks.
+
+- **Automated Stop Loss Engine (Auto Sell):**
+  - 🛑 **Real-time Price Monitoring:** Background worker scans held tokens (every 20s) comparing DexScreener prices with entry prices.
+  - 📉 **Configurable Threshold:** Automatically executes a `SELL` order when token loss exceeds configured percentage (e.g. `/setstoploss 20` for -20%).
+
+- **Token Blacklisting / Block List:**
+  - 🚫 **Block Unwanted Tokens:** Easily blacklist token addresses (`/blocktoken`) to automatically skip buy orders for scam or unwanted tokens.
+
+- **Token-2022 & Pump.fun Support:**
+  - 🪙 **Full Token Program Support:** Queries both standard SPL Token (`TOKEN_PROGRAM_ID`) and Token-2022 (`TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb`) programs, capturing all Pump.fun memecoins and SPL tokens.
+
+- **Live & Virtual Portfolio Dashboard:**
+  - 💼 Real-time RPC wallet queries (`/liveportfolio`, `/myportfolio`, `/dryportfolio`) displaying SOL balance, SPL token holdings, and USD market valuations via DexScreener.
+
+- **Wallet Security & AES-256 Encryption:**
+  - 🔑 Private keys are encrypted at rest using AES-256-CBC with individual initialization vectors (IV).
+
+---
 
 ## 🏗️ Architecture
 
-This repository is built using a monorepo structure (npm workspaces):
+This project is structured as a TypeScript monorepo using `npm workspaces`:
 
-- `apps/telegram`: The frontend Telegram Bot UI. Handles user registration, wallet generation, and target management.
-- `apps/worker`: The background execution engine. Listens to blockchain events, processes the BullMQ queue, and executes trades via Jupiter.
-- `packages/database`: Prisma ORM schema and database client.
-- `packages/blockchain`: Blockchain transaction parser and wallet monitor.
-- `packages/execution`: Decision engine, risk management, and Jupiter execution logic.
-- `packages/common`: Shared utilities (like encryption).
+- `apps/telegram`: Telegram bot user interface (menus, command handlers, user settings).
+- `apps/worker`: Background job processing queue and Stop Loss monitoring engine.
+- `packages/database`: Prisma ORM schema and PostgreSQL client.
+- `packages/blockchain`: Solana RPC transaction parser and real-time wallet monitor.
+- `packages/execution`: Decision engine, position sizing, risk management, and Jupiter v1 swap executor.
+- `packages/common`: Shared encryption and utility helpers.
+
+---
 
 ## 📋 Prerequisites
 
-Before you begin, ensure you have the following installed:
+Ensure you have installed:
 - [Node.js](https://nodejs.org/en/) (v18 or higher)
-- [PostgreSQL](https://www.postgresql.org/) (Running and accessible)
-- [Redis](https://redis.io/) (Running and accessible)
+- [PostgreSQL](https://www.postgresql.org/)
+- [Redis](https://redis.io/)
 
-You will also need:
-- A Telegram Bot Token from [@BotFather](https://t.me/botfather).
-- (Optional but recommended) A fast RPC URL or [Helius API Key](https://helius.dev/) for reliable Solana node access.
+Requirements:
+- Telegram Bot Token from [@BotFather](https://t.me/botfather).
+- Solana RPC URL (e.g. Helius, QuickNode, or official Mainnet RPC).
+
+---
 
 ## 🚀 Installation & Setup
 
@@ -46,54 +74,60 @@ You will also need:
    ```
 
 3. **Configure Environment Variables:**
-   Create a `.env` file in the root directory based on `.env.example`:
-   ```bash
-   cp .env.example .env
-   ```
-   *Make sure to configure the following in your `.env` file:*
-   - `DATABASE_URL`: Your PostgreSQL connection string.
-   - `REDIS_URL`: Your Redis connection string (default: `redis://localhost:6379`).
-   - `TELEGRAM_BOT_TOKEN`: Your bot token from BotFather.
-   - `ENCRYPTION_KEY`: A completely random 32-character string used to encrypt private keys.
-   - `SOLANA_RPC_URL`: Your Solana RPC endpoint.
-
-4. **Initialize the Database:**
-   Sync the Prisma schema with your PostgreSQL database:
-   ```bash
-   cd packages/database
-   npx prisma db push
-   cd ../..
+   Create `.env` file in the root directory:
+   ```env
+   DATABASE_URL="postgresql://user:password@localhost:5432/copytrade?schema=public"
+   REDIS_URL="redis://localhost:6379"
+   TELEGRAM_BOT_TOKEN="your_telegram_bot_token"
+   ENCRYPTION_KEY="your_32_character_encryption_key"
+   SOLANA_RPC_URL="https://api.mainnet-beta.solana.com"
+   SIMULATE_TRADES="false"
    ```
 
-5. **Build the project:**
-   Compile the TypeScript packages:
+4. **Initialize Database:**
+   ```bash
+   npx prisma db push --schema=packages/database/prisma/schema.prisma
+   npx prisma generate --schema=packages/database/prisma/schema.prisma
+   ```
+
+5. **Build Projects:**
    ```bash
    npm run build
    ```
 
-## 🏃 Running the Bot
+---
 
-Because of the microservice architecture, you need to run both the Telegram UI and the Worker backend simultaneously. 
+## 🏃 Running with PM2
 
-**Terminal 1 (Telegram Bot):**
+Start both processes using PM2 or npm:
+
 ```bash
-npx tsx apps/telegram/src/index.ts
+# Telegram Bot Process
+npx pm2 start apps/telegram/dist/index.js --name copytrade-telegram
+
+# Worker Process
+npx pm2 start apps/worker/dist/index.js --name copytrade-worker
 ```
 
-**Terminal 2 (Worker Engine):**
-```bash
-npx tsx apps/worker/src/index.ts
-```
+---
 
-## 🛠️ Usage
+## 🤖 Telegram Commands Reference
 
-1. Open Telegram and search for your bot.
-2. Send `/start` to initialize your account.
-3. Your bot will automatically generate a new Solana wallet for you (which is securely encrypted).
-4. Click **Target Wallets** and reply with the Solana address you wish to copy.
-5. Use the **🔄 Toggle Mode** button to switch between **COPY** (auto-execute trades) and **MONITOR** (alert only).
-6. Ensure your bot's wallet is funded with a small amount of SOL for network fees and trading.
+| Command | Description | Example |
+| :--- | :--- | :--- |
+| `/start` | Initialize account and generate encrypted Solana wallet | `/start` |
+| `/liveportfolio` | View live Mainnet SOL balance and SPL token holdings | `/liveportfolio` |
+| `/dryportfolio` | View virtual paper trading portfolio and PnL metrics | `/dryportfolio` |
+| `/setslippage [val]` | Set slippage percentage or enable auto dynamic slippage | `/setslippage auto` or `/setslippage 2.5` |
+| `/setfee [sol]` | Set priority fee in SOL for transaction landing | `/setfee 0.002` |
+| `/setstoploss [pct]`| Configure Auto Sell Stop Loss threshold percentage | `/setstoploss 20` or `/setstoploss off` |
+| `/blocktoken [addr]`| Blacklist a token address to skip copy buying | `/blocktoken 8Jqs2L... CallDog` |
+| `/unblocktoken [addr]`| Remove token address from blacklist | `/unblocktoken 8Jqs2L...` |
+| `/blockedtokens` | View and manage blacklisted tokens list | `/blockedtokens` |
+| `/setdryequity [sol]`| Set virtual starting equity SOL for paper trading | `/setdryequity 2.5` |
+
+---
 
 ## ⚠️ Disclaimer
 
-Trading cryptocurrencies, especially newly launched tokens on DEXs, is extremely risky. This software is provided "as is", without warranty of any kind. Use at your own risk. Always test in Monitor Mode with small amounts before fully copying a wallet.
+Trading cryptocurrencies and memecoins on Solana involves significant financial risk. This bot is provided for educational and experimental purposes. Always test in **MONITOR** or **DRY_RUN** mode before trading live funds on Mainnet. Use at your own risk.
