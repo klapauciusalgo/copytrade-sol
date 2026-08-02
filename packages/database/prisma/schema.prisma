@@ -14,8 +14,9 @@ model User {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  wallets   Wallet[]
-  settings  UserSettings?
+  wallets       Wallet[]
+  settings      UserSettings?
+  blockedTokens BlockedToken[]
 }
 
 model UserSettings {
@@ -26,6 +27,7 @@ model UserSettings {
   defaultSlippage Float @default(1.0)
   priorityFee     Float @default(0.001)
   dryRunEquitySol Float @default(1.0)  // Virtual equity in SOL for dry-run mode
+  stopLossPercent Float @default(20.0) // Auto sell when loss exceeds X% (0 = disabled)
   
   updatedAt DateTime @updatedAt
 }
@@ -47,6 +49,7 @@ model Wallet {
   
   copyTargets     CopyTarget[]
   dryRunPositions DryRunPosition[]
+  livePositions   LivePosition[]
 }
 
 model CopyTarget {
@@ -87,6 +90,24 @@ model DryRunPosition {
   @@unique([walletId, targetAddress, tokenMint])
 }
 
+model LivePosition {
+  id             String   @id @default(uuid())
+  walletId       String
+  wallet         Wallet   @relation(fields: [walletId], references: [id])
+  targetAddress  String
+  tokenMint      String
+  tokenSymbol    String   @default("")
+  
+  solSpent       Float    // SOL spent to buy this position
+  tokenAmount    Float    // Token quantity bought
+  buyPriceSol    Float    // Entry price per token in SOL
+
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([walletId, targetAddress, tokenMint])
+}
+
 enum CopyStatus {
   ACTIVE
   PAUSED
@@ -101,4 +122,17 @@ enum CopyMode {
 enum CopyStrategy {
   FIXED
   RATIO
+}
+
+model BlockedToken {
+  id           String   @id @default(uuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id])
+  
+  tokenAddress String
+  label        String?
+  
+  createdAt    DateTime @default(now())
+
+  @@unique([userId, tokenAddress])
 }

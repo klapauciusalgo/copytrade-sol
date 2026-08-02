@@ -34,7 +34,20 @@ export class DecisionEngine {
       const userSettings = target.wallet.user.settings;
       if (!userSettings) continue;
 
-      // 2. Calculate Size
+      // 2. Check if token is blocked by user
+      const isBlocked = await prisma.blockedToken.findFirst({
+        where: {
+          userId: target.wallet.userId,
+          tokenAddress: event.token
+        }
+      });
+
+      if (isBlocked) {
+        console.log(`[Decision] Skipping ${event.action} for ${event.token}: Token is in user's blocked list (${isBlocked.label || 'No label'})`);
+        continue;
+      }
+
+      // 3. Calculate Size
       const positionSol = calculatePositionSize(event, target);
       if (positionSol <= 0) continue;
 
@@ -50,8 +63,9 @@ export class DecisionEngine {
         amountSolIn: event.action === 'BUY' ? positionSol : undefined,
         // For sells, ideally we determine token balance to sell 100%. 
         // For now, if RATIO, we just mock selling a proportion.
-        amountTokenIn: event.action === 'SELL' ? event.amount * (target.ratio || 1) : undefined,
-        slippageBps: userSettings.defaultSlippage * 100, // e.g. 1% = 100 bps
+        slippageBps: userSettings.defaultSlippage === 0 
+          ? 0 
+          : (event.action === 'SELL' ? Math.max(userSettings.defaultSlippage * 100, 300) : userSettings.defaultSlippage * 100),
         priorityFee: userSettings.priorityFee,
         mode: target.mode as 'COPY' | 'MONITOR' | 'DRY_RUN'
       });

@@ -4,7 +4,7 @@ import { Wallet } from '@copytrade/database';
 import { decrypt } from '@copytrade/common';
 import bs58 from 'bs58';
 
-const JUPITER_API_URL = 'https://quote-api.jup.ag/v6';
+const JUPITER_API_URL = 'https://api.jup.ag/swap/v1';
 const NATIVE_SOL_MINT = 'So11111111111111111111111111111111111111112';
 
 export class ExecutionEngine {
@@ -35,8 +35,7 @@ export class ExecutionEngine {
       // For SELLs, fetch the user's actual token balance directly from Solana RPC
       rawAmount = await this.getRawTokenAmountForUser(userPublicKey, request.tokenMint, 1.0);
       if (rawAmount <= 0) {
-        // Fallback to estimation if no SPL token account found
-        rawAmount = Math.floor((request.amountTokenIn || 0) * 1e6);
+        throw new Error('No on-chain token balance found to sell (token not held in real wallet)');
       }
     }
 
@@ -106,7 +105,12 @@ export class ExecutionEngine {
   }
 
   private async getJupiterQuote(inputMint: string, outputMint: string, amount: number, slippageBps: number) {
-    const url = `${JUPITER_API_URL}/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}&slippageBps=${slippageBps}`;
+    let url = `${JUPITER_API_URL}/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}`;
+    if (slippageBps === 0) {
+      url += `&autoSlippage=true&maxAutoSlippageBps=1000`; // Dynamic slippage up to 10%
+    } else {
+      url += `&slippageBps=${slippageBps}`;
+    }
     const response = await fetch(url);
     if (!response.ok) return null;
     return response.json();

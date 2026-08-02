@@ -4,6 +4,7 @@ export const mainMenu = Markup.inlineKeyboard([
   [Markup.button.callback('💼 My Portfolio', 'view_portfolio')],
   [Markup.button.callback('👛 Wallet Management', 'manage_wallet')],
   [Markup.button.callback('🎯 Target Wallets', 'manage_targets')],
+  [Markup.button.callback('🚫 Blocked Tokens', 'manage_blocked_tokens')],
   [Markup.button.callback('⚙️ Settings', 'view_settings')],
 ]);
 
@@ -23,6 +24,7 @@ export const confirmDeleteMenu = Markup.inlineKeyboard([
 export const settingsMenu = Markup.inlineKeyboard([
   [Markup.button.callback('Set Slippage', 'set_slippage')],
   [Markup.button.callback('Set Priority Fee', 'set_fee')],
+  [Markup.button.callback('🛑 Set Stop Loss', 'set_stop_loss')],
   [Markup.button.callback('🔙 Back to Main', 'main_menu')]
 ]);
 

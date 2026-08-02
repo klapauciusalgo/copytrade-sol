@@ -59,10 +59,20 @@ bot.action('main_menu', async (ctx) => {
 });
 
 bot.action('view_portfolio', async (ctx) => {
-  await ctx.editMessageText('💼 <b>Your Portfolio</b>\n\nBalance: 0.00 SOL\nActive Copies: 0', {
-    parse_mode: 'HTML',
-    ...backToMain
-  }).catch(() => {});
+  const telegramId = ctx.from?.id.toString() || '';
+  try {
+    const { text } = await getLivePortfolioMessage(telegramId);
+    await ctx.editMessageText(text, {
+      parse_mode: 'HTML',
+      link_preview_options: { is_disabled: true },
+      ...backToMain
+    }).catch(() => {});
+  } catch (e) {
+    await ctx.editMessageText('❌ Failed to fetch live portfolio.', {
+      parse_mode: 'HTML',
+      ...backToMain
+    }).catch(() => {});
+  }
 });
 
 bot.action('manage_wallet', async (ctx) => {
@@ -71,8 +81,22 @@ bot.action('manage_wallet', async (ctx) => {
   
   let walletText = '👛 <b>Wallet Management</b>\n\n';
   if (user && user.wallets.length > 0) {
-    const pubKey = user.wallets[0].publicKey;
-    walletText += `<b>Active Wallet:</b>\n<code>${pubKey}</code>\n\n<i>Fund this address with SOL to pay for trades and fees.</i>`;
+    const pubKeyStr = user.wallets[0].publicKey;
+    let balanceSol = '0.0000';
+    try {
+      const heliusKey = process.env.HELIUS_API_KEY;
+      const rpcUrl = (heliusKey && heliusKey !== 'your_helius_api_key_here') 
+        ? `https://mainnet.helius-rpc.com/?api-key=${heliusKey}`
+        : (process.env.SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com');
+
+      const connection = new Connection(rpcUrl, 'confirmed');
+      const balanceRaw = await connection.getBalance(new PublicKey(pubKeyStr));
+      balanceSol = (balanceRaw / 1e9).toFixed(4);
+    } catch (e) {
+      console.error('Error fetching balance for wallet management:', e);
+    }
+
+    walletText += `<b>Active Wallet:</b>\n<code>${pubKeyStr}</code>\n\n💰 <b>Live Balance:</b> <b>${balanceSol} SOL</b>\n\n<i>Fund this address with SOL to pay for live trades and gas fees.</i>`;
   } else {
     walletText += 'No wallet found. Generate a new one or import an existing wallet.';
   }
@@ -245,6 +269,48 @@ bot.action('manage_targets', async (ctx) => {
   }).catch(() => {});
 });
 
+// ── Blocked Tokens Management ────────────────────────────────────────────────
+async function renderBlockedTokensMenu(ctx: any) {
+  const telegramId = ctx.from?.id.toString() || '';
+  const user = await prisma.user.findUnique({
+    where: { telegramId },
+    include: { blockedTokens: true }
+  });
+
+  let text = '🚫 <b>Blocked Tokens List</b>\n\n';
+  let inlineKeyboard: any[] = [];
+
+  if (user && user.blockedTokens.length > 0) {
+    text += '<i>The bot will automatically ignore and SKIP buying any tokens in this list:</i>\n\n';
+    user.blockedTokens.forEach((t, i) => {
+      const labelStr = t.label ? ` (${t.label})` : '';
+      text += `${i + 1}. <code>${t.tokenAddress}</code>${labelStr}\n`;
+      inlineKeyboard.push([
+        { text: `🗑️ Unblock ${t.label || t.tokenAddress.slice(0, 6)}...`, callback_data: `unblock_${t.tokenAddress}` }
+      ]);
+    });
+  } else {
+    text += 'No tokens currently blocked.\n\n<i>To block a token, send:</i>\n<code>/blocktoken [address] [optional_name]</code>\n\n<i>Example:</i>\n<code>/blocktoken 8Jqs2Le4HsNUxfEWy44vQaDWrR3gqR3cvSJigDMcpump CallDog</code>';
+  }
+
+  inlineKeyboard.push([{ text: '🔙 Back to Main', callback_data: 'main_menu' }]);
+
+  if (ctx.callbackQuery) {
+    await ctx.editMessageText(text, {
+      parse_mode: 'HTML',
+      reply_markup: { inline_keyboard: inlineKeyboard }
+    }).catch(() => {});
+  } else {
+    await ctx.reply(text, {
+      parse_mode: 'HTML',
+      reply_markup: { inline_keyboard: inlineKeyboard }
+    });
+  }
+}
+
+bot.action('manage_blocked_tokens', renderBlockedTokensMenu);
+bot.command('blockedtokens', renderBlockedTokensMenu);
+
 // ─── Target Order Size Settings ──────────────────────────────────────────────
 bot.action(/^target_settings_(.+)$/, async (ctx) => {
   const targetAddress = ctx.match[1];
@@ -323,12 +389,16 @@ bot.action(/^port_(.+)$/, async (ctx) => {
     const solBalanceRaw = await connection.getBalance(pubKey);
     const solBalance = (solBalanceRaw / 1e9).toFixed(4);
 
-    const tokenAccounts = await connection.getParsedTokenAccountsByOwner(pubKey, { programId: TOKEN_PROGRAM_ID });
+    const [stdAccounts, t2022Accounts] = await Promise.all([
+      connection.getParsedTokenAccountsByOwner(pubKey, { programId: TOKEN_PROGRAM_ID }).catch(() => ({ value: [] })),
+      connection.getParsedTokenAccountsByOwner(pubKey, { programId: TOKEN_2022_PROGRAM_ID }).catch(() => ({ value: [] }))
+    ]);
+    const tokenAccountsList = [...stdAccounts.value, ...t2022Accounts.value];
     
     let tokenText = '';
     let count = 0;
     
-    for (const { account } of tokenAccounts.value) {
+    for (const { account } of tokenAccountsList) {
       const parsedInfo = account.data.parsed.info;
       const amount = parsedInfo.tokenAmount.uiAmount;
       if (amount > 0) {
@@ -369,12 +439,26 @@ bot.action('view_settings', async (ctx) => {
   const user = await prisma.user.findUnique({ where: { telegramId }, include: { settings: true }});
   
   const dryEquity = user?.settings?.dryRunEquitySol ?? 1.0;
-  const text = `⚙️ <b>Global Settings</b>\n\nSlippage: ${user?.settings?.defaultSlippage || 1.0}%\nPriority Fee: ${user?.settings?.priorityFee || 0.001} SOL\n🧪 Dry Run Equity: ${dryEquity} SOL\n\n<i>To change dry run equity, use /setdryequity [amount]\nExample: /setdryequity 2.5</i>`;
+  const slippageDisplay = user?.settings?.defaultSlippage === 0 ? 'Auto' : `${user?.settings?.defaultSlippage || 1.0}%`;
+  const stopLossDisplay = (user?.settings?.stopLossPercent ?? 20) === 0 ? 'Disabled' : `-${user?.settings?.stopLossPercent ?? 20}%`;
+  const text = `⚙️ <b>Global Settings</b>\n\nSlippage: ${slippageDisplay}\nPriority Fee: ${user?.settings?.priorityFee || 0.001} SOL\n🛑 Stop Loss: ${stopLossDisplay}\n🧪 Dry Run Equity: ${dryEquity} SOL\n\n<i>Use these commands to update settings:\n/setstoploss [percent | off]\n/setslippage [value | auto]\n/setfee [value]\n/setdryequity [amount]</i>`;
   
   await ctx.editMessageText(text, {
     parse_mode: 'HTML',
     ...settingsMenu
   }).catch(() => {});
+});
+
+bot.action('set_slippage', (ctx) => {
+  ctx.reply('To update your slippage, please send the command:\n<code>/setslippage [percentage]</code>\n\nExamples:\n<code>/setslippage 2.5</code> (for 2.5%)\n<code>/setslippage auto</code> (for dynamic Jupiter slippage)', { parse_mode: 'HTML' });
+});
+
+bot.action('set_fee', (ctx) => {
+  ctx.reply('To update your priority fee, please send the command:\n<code>/setfee [amount_in_SOL]</code>\n\nExample: <code>/setfee 0.005</code>', { parse_mode: 'HTML' });
+});
+
+bot.action('set_stop_loss', (ctx) => {
+  ctx.reply('To update your Stop Loss percentage, please send the command:\n<code>/setstoploss [percentage]</code>\n\nExamples:\n<code>/setstoploss 20</code> (auto sell if price drops 20%)\n<code>/setstoploss 15</code> (auto sell if price drops 15%)\n<code>/setstoploss off</code> (disable stop loss)', { parse_mode: 'HTML' });
 });
 
 import { Keypair } from '@solana/web3.js';
@@ -597,6 +681,7 @@ bot.command('export', async (ctx) => {
 
 import { Connection, PublicKey } from '@solana/web3.js';
 const TOKEN_PROGRAM_ID = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
+const TOKEN_2022_PROGRAM_ID = new PublicKey('TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb');
 
 // Command to check a target's portfolio
 bot.command('portfolio', async (ctx) => {
@@ -623,13 +708,17 @@ bot.command('portfolio', async (ctx) => {
     const solBalanceRaw = await connection.getBalance(pubKey);
     const solBalance = (solBalanceRaw / 1e9).toFixed(4);
 
-    // Fetch SPL Tokens
-    const tokenAccounts = await connection.getParsedTokenAccountsByOwner(pubKey, { programId: TOKEN_PROGRAM_ID });
+    // Fetch SPL Tokens (Both Standard & Token-2022)
+    const [stdAccounts, t2022Accounts] = await Promise.all([
+      connection.getParsedTokenAccountsByOwner(pubKey, { programId: TOKEN_PROGRAM_ID }).catch(() => ({ value: [] })),
+      connection.getParsedTokenAccountsByOwner(pubKey, { programId: TOKEN_2022_PROGRAM_ID }).catch(() => ({ value: [] }))
+    ]);
+    const tokenAccountsList = [...stdAccounts.value, ...t2022Accounts.value];
     
     let tokenText = '';
     let count = 0;
     
-    for (const { account } of tokenAccounts.value) {
+    for (const { account } of tokenAccountsList) {
       const parsedInfo = account.data.parsed.info;
       const amount = parsedInfo.tokenAmount.uiAmount;
       if (amount > 0) {
@@ -817,6 +906,120 @@ bot.command('dryportfolio', async (ctx) => {
   }).catch(() => {});
 });
 
+// Helper for fetching live production portfolio
+async function getLivePortfolioMessage(telegramId: string) {
+  const user = await prisma.user.findUnique({
+    where: { telegramId },
+    include: { wallets: { include: { copyTargets: true } } }
+  });
+
+  if (!user || user.wallets.length === 0) {
+    return { text: '❌ No wallet found. Use /start first.' };
+  }
+
+  const pubKeyStr = user.wallets[0].publicKey;
+  const activeTargetsCount = user.wallets[0].copyTargets.filter(t => t.status === 'ACTIVE').length;
+
+  const heliusKey = process.env.HELIUS_API_KEY;
+  const rpcUrl = (heliusKey && heliusKey !== 'your_helius_api_key_here') 
+    ? `https://mainnet.helius-rpc.com/?api-key=${heliusKey}`
+    : (process.env.SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com');
+
+  const connection = new Connection(rpcUrl, 'confirmed');
+  const pubKey = new PublicKey(pubKeyStr);
+
+  // Fetch Native SOL Balance
+  const solBalanceRaw = await connection.getBalance(pubKey);
+  const solBalance = solBalanceRaw / 1e9;
+
+  // Fetch SOL price in USD
+  let solPriceUsd = 150;
+  try {
+    const solRes = await fetch('https://api.dexscreener.com/latest/dex/tokens/So11111111111111111111111111111111111111112').catch(() => null);
+    if (solRes) {
+      const data = await solRes.json();
+      const solPair = data.pairs?.find((p: any) => p.chainId === 'solana' && (p.quoteToken.symbol === 'USDC' || p.quoteToken.symbol === 'USDT'));
+      if (solPair?.priceUsd) solPriceUsd = parseFloat(solPair.priceUsd);
+    }
+  } catch (e) {}
+
+  // Fetch SPL Tokens (Both Standard SPL & Token-2022 used by Pump.fun)
+  const [stdAccounts, t2022Accounts] = await Promise.all([
+    connection.getParsedTokenAccountsByOwner(pubKey, { programId: TOKEN_PROGRAM_ID }).catch(() => ({ value: [] })),
+    connection.getParsedTokenAccountsByOwner(pubKey, { programId: TOKEN_2022_PROGRAM_ID }).catch(() => ({ value: [] }))
+  ]);
+  
+  const activeTokens = [...stdAccounts.value, ...t2022Accounts.value]
+    .map(a => a.account.data.parsed.info)
+    .filter(info => info.tokenAmount.uiAmount > 0);
+
+  let totalTokensValueSol = 0;
+  let tokensText = '';
+
+  await Promise.all(
+    activeTokens.map(async (info) => {
+      const mint = info.mint;
+      const uiAmount = info.tokenAmount.uiAmount;
+      let priceNativeSol = 0;
+      let symbol = `${mint.slice(0, 4)}...${mint.slice(-4)}`;
+
+      try {
+        const res = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${mint}`).catch(() => null);
+        if (res) {
+          const data = await res.json();
+          const pair = data.pairs?.find((p: any) => p.chainId === 'solana') || data.pairs?.[0];
+          if (pair) {
+            if (pair.baseToken?.symbol) symbol = pair.baseToken.symbol;
+            if (pair.priceNative) priceNativeSol = parseFloat(pair.priceNative);
+          }
+        }
+      } catch (e) {}
+
+      const tokenValSol = uiAmount * priceNativeSol;
+      const tokenValUsd = tokenValSol * solPriceUsd;
+      totalTokensValueSol += tokenValSol;
+
+      const formattedAmount = uiAmount >= 10000 ? uiAmount.toLocaleString('en-US', { maximumFractionDigits: 0 }) : uiAmount.toFixed(2);
+      tokensText += `\n🪙 <b>${symbol}</b>\n   Balance: ${formattedAmount} → Value: <b>${tokenValSol.toFixed(4)} SOL</b> ($${tokenValUsd.toFixed(2)})\n`;
+    })
+  );
+
+  if (tokensText === '') tokensText = '<i>No SPL tokens currently held.</i>\n';
+
+  const totalNetWorthSol = solBalance + totalTokensValueSol;
+  const netWorthUsd = (totalNetWorthSol * solPriceUsd).toFixed(2);
+  const solBalanceUsd = (solBalance * solPriceUsd).toFixed(2);
+  const tokensValUsd = (totalTokensValueSol * solPriceUsd).toFixed(2);
+
+  let msg = `🚀 <b>Live Production Portfolio</b>\n\n`;
+  msg += `🔑 <b>Wallet:</b> <code>${pubKeyStr}</code>\n`;
+  msg += `💼 <b>Total Net Worth:</b> <b>${totalNetWorthSol.toFixed(4)} SOL</b> ($${netWorthUsd})\n`;
+  msg += `💰 <b>SOL Balance:</b> <b>${solBalance.toFixed(4)} SOL</b> ($${solBalanceUsd})\n`;
+  msg += `🪙 <b>Held Tokens Value:</b> ${totalTokensValueSol.toFixed(4)} SOL ($${tokensValUsd})\n`;
+  msg += `🎯 <b>Active Targets:</b> ${activeTargetsCount}\n\n`;
+  msg += `<b>Held Tokens (${activeTokens.length}):</b>\n${tokensText}\n`;
+  msg += `🔗 <a href="https://solscan.io/account/${pubKeyStr}">View on Solscan</a>`;
+
+  return { text: msg };
+}
+
+// /liveportfolio & /myportfolio commands
+bot.command(['liveportfolio', 'myportfolio'], async (ctx) => {
+  const telegramId = ctx.from?.id.toString();
+  if (!telegramId) return;
+
+  const statusMsg = await ctx.reply('⏳ Fetching live production portfolio & token valuations...');
+  try {
+    const { text } = await getLivePortfolioMessage(telegramId);
+    await ctx.telegram.editMessageText(ctx.chat.id, statusMsg.message_id, undefined, text, {
+      parse_mode: 'HTML',
+      link_preview_options: { is_disabled: true }
+    });
+  } catch (e) {
+    ctx.reply('❌ Failed to fetch live portfolio.');
+  }
+});
+
 // /setdryequity — set virtual equity
 bot.command('setdryequity', async (ctx) => {
   const telegramId = ctx.from?.id.toString();
@@ -840,6 +1043,169 @@ bot.command('setdryequity', async (ctx) => {
   });
 
   return ctx.replyWithHTML(`✅ <b>Dry Run Equity Updated!</b>\n\nVirtual equity set to <b>${amount} SOL</b>.\n\n<i>Note: This only changes your available equity. Open positions are not affected. Use /dryportfolio to reset.</i>`);
+});
+
+bot.command('setslippage', async (ctx) => {
+  const telegramId = ctx.from?.id.toString();
+  if (!telegramId) return;
+
+  const args = ctx.message.text.split(' ');
+  const input = args[1]?.toLowerCase();
+  let amount = 0;
+
+  if (input !== 'auto') {
+    amount = parseFloat(input);
+    if (isNaN(amount) || amount <= 0 || amount > 100) {
+      return ctx.reply('❌ Invalid percentage.\n\nUsage: <code>/setslippage 2.5</code> or <code>/setslippage auto</code>\nExample sets slippage to 2.5%.', { parse_mode: 'HTML' });
+    }
+  }
+
+  const user = await prisma.user.findUnique({ where: { telegramId }, include: { settings: true } });
+  if (!user || !user.settings) {
+    return ctx.reply('❌ User settings not found. Please send /start first.');
+  }
+
+  await prisma.userSettings.update({
+    where: { userId: user.id },
+    data: { defaultSlippage: amount }
+  });
+
+  const display = amount === 0 ? 'Auto (Dynamic)' : `${amount}%`;
+  return ctx.replyWithHTML(`✅ <b>Slippage Updated!</b>\n\nDefault slippage set to <b>${display}</b>.`);
+});
+
+bot.command('setfee', async (ctx) => {
+  const telegramId = ctx.from?.id.toString();
+  if (!telegramId) return;
+
+  const args = ctx.message.text.split(' ');
+  const amount = parseFloat(args[1]);
+
+  if (isNaN(amount) || amount < 0) {
+    return ctx.reply('❌ Invalid amount.\n\nUsage: <code>/setfee 0.005</code>\nExample sets priority fee to 0.005 SOL.', { parse_mode: 'HTML' });
+  }
+
+  const user = await prisma.user.findUnique({ where: { telegramId }, include: { settings: true } });
+  if (!user || !user.settings) {
+    return ctx.reply('❌ User settings not found. Please send /start first.');
+  }
+
+  await prisma.userSettings.update({
+    where: { userId: user.id },
+    data: { priorityFee: amount }
+  });
+
+  return ctx.replyWithHTML(`✅ <b>Priority Fee Updated!</b>\n\nDefault priority fee set to <b>${amount} SOL</b>.`);
+});
+
+bot.command('setstoploss', async (ctx) => {
+  const telegramId = ctx.from?.id.toString();
+  if (!telegramId) return;
+
+  const args = ctx.message.text.split(' ');
+  const input = args[1]?.toLowerCase();
+  let amount = 0;
+
+  if (input !== 'off' && input !== '0') {
+    amount = parseFloat(input);
+    if (isNaN(amount) || amount <= 0 || amount > 95) {
+      return ctx.reply('❌ Invalid percentage.\n\nUsage: <code>/setstoploss 20</code> or <code>/setstoploss off</code>\nExample sets Stop Loss to -20%.', { parse_mode: 'HTML' });
+    }
+  }
+
+  const user = await prisma.user.findUnique({ where: { telegramId }, include: { settings: true } });
+  if (!user || !user.settings) {
+    return ctx.reply('❌ User settings not found. Please send /start first.');
+  }
+
+  await prisma.userSettings.update({
+    where: { userId: user.id },
+    data: { stopLossPercent: amount }
+  });
+
+  const display = amount === 0 ? 'Disabled' : `-${amount}%`;
+  return ctx.replyWithHTML(`✅ <b>Stop Loss Updated!</b>\n\nStop Loss trigger set to <b>${display}</b>.`);
+});
+
+bot.command('blocktoken', async (ctx) => {
+  const telegramId = ctx.from?.id.toString();
+  if (!telegramId) return;
+
+  const args = ctx.message.text.split(' ');
+  const tokenAddress = args[1]?.trim();
+  const label = args.slice(2).join(' ') || undefined;
+
+  if (!tokenAddress || tokenAddress.length < 30) {
+    return ctx.reply('❌ Invalid Token Address.\n\nUsage: <code>/blocktoken [address] [optional_name]</code>\nExample: <code>/blocktoken 8Jqs2Le4HsNUxfEWy44vQaDWrR3gqR3cvSJigDMcpump CallDog</code>', { parse_mode: 'HTML' });
+  }
+
+  const user = await prisma.user.findUnique({ where: { telegramId } });
+  if (!user) {
+    return ctx.reply('❌ User not found. Please send /start first.');
+  }
+
+  await prisma.blockedToken.upsert({
+    where: {
+      userId_tokenAddress: {
+        userId: user.id,
+        tokenAddress
+      }
+    },
+    create: {
+      userId: user.id,
+      tokenAddress,
+      label
+    },
+    update: {
+      label
+    }
+  });
+
+  const labelMsg = label ? ` (${label})` : '';
+  return ctx.replyWithHTML(`✅ <b>Token Blocked Successfully!</b>\n\nToken: <code>${tokenAddress}</code>${labelMsg}\n\n<i>The bot will now automatically ignore and SKIP buying this token.</i>`);
+});
+
+bot.command('unblocktoken', async (ctx) => {
+  const telegramId = ctx.from?.id.toString();
+  if (!telegramId) return;
+
+  const args = ctx.message.text.split(' ');
+  const tokenAddress = args[1]?.trim();
+
+  if (!tokenAddress) {
+    return ctx.reply('❌ Usage: <code>/unblocktoken [address]</code>', { parse_mode: 'HTML' });
+  }
+
+  const user = await prisma.user.findUnique({ where: { telegramId } });
+  if (!user) return;
+
+  await prisma.blockedToken.deleteMany({
+    where: {
+      userId: user.id,
+      tokenAddress
+    }
+  });
+
+  return ctx.replyWithHTML(`✅ Token <code>${tokenAddress}</code> unblocked.`);
+});
+
+bot.action(/^unblock_(.+)$/, async (ctx) => {
+  const telegramId = ctx.from?.id.toString();
+  if (!telegramId) return ctx.answerCbQuery();
+
+  const tokenAddress = ctx.match[1];
+  const user = await prisma.user.findUnique({ where: { telegramId } });
+  if (!user) return ctx.answerCbQuery();
+
+  await prisma.blockedToken.deleteMany({
+    where: {
+      userId: user.id,
+      tokenAddress
+    }
+  });
+
+  await ctx.answerCbQuery('Token unblocked!');
+  return renderBlockedTokensMenu(ctx);
 });
 
 // Reset dry run portfolio
